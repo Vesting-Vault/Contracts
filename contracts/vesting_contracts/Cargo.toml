@@ -1,6 +1,6 @@
 [package]
 name = "vesting_contracts"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 publish = false
 
@@ -8,8 +8,16 @@ publish = false
 crate-type = ["lib", "cdylib"]
 doctest = false
 
+[[bin]]
+name = "test"
+path = "src/test.rs"
+
 [dependencies]
 soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[[bench]]
+name = "lazy_vs_full"
+harness = false

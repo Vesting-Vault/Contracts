@@ -28,26 +28,49 @@ jobs:
 
       - name: Install Stellar CLI
         run: |
+          # Try official installation method first
+          echo "Attempting official installation method..."
+          if command -v cargo &> /dev/null; then
+            echo "Installing via cargo..."
+            cargo install stellar-cli --version 25.1.0 --locked
+            if [ $? -eq 0 ]; then
+              echo "Successfully installed via cargo"
+              stellar --version
+              exit 0
+            fi
+          fi
+          
+          echo "Cargo installation failed, trying manual installation..."
           wget https://github.com/stellar/stellar-cli/releases/download/v25.1.0/stellar-cli-25.1.0-x86_64-unknown-linux-gnu.tar.gz
           tar -xzf stellar-cli-25.1.0-x86_64-unknown-linux-gnu.tar.gz
+          echo "Directory contents:"
           ls -la stellar-cli-25.1.0-x86_64-unknown-linux-gnu/
-          # Find the actual binary name (might be stellar or stellar-cli)
+          echo "Looking for binary..."
+          
+          # The binary is likely named 'stellar-cli' based on the package name
+          BINARY_PATH=""
           if [ -f "stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar" ]; then
-            sudo mv stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar /usr/local/bin/
-            sudo chmod +x /usr/local/bin/stellar
-            echo "Using 'stellar' binary"
+            BINARY_PATH="stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar"
+            BINARY_NAME="stellar"
           elif [ -f "stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar-cli" ]; then
-            sudo mv stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar-cli /usr/local/bin/
-            sudo chmod +x /usr/local/bin/stellar-cli
-            echo "Using 'stellar-cli' binary"
+            BINARY_PATH="stellar-cli-25.1.0-x86_64-unknown-linux-gnu/stellar-cli"
+            BINARY_NAME="stellar-cli"
           else
             echo "Error: Could not find stellar binary in extracted directory"
-            ls -la stellar-cli-25.1.0-x86_64-unknown-linux-gnu/
+            echo "All files in directory:"
+            find stellar-cli-25.1.0-x86_64-unknown-linux-gnu/ -type f
             exit 1
           fi
-          # Test the installation
-          which stellar || which stellar-cli
-          (stellar --version 2>/dev/null || stellar-cli --version) || echo "Binary not found in PATH"
+          
+          echo "Found binary: $BINARY_PATH"
+          echo "Installing as: $BINARY_NAME"
+          
+          sudo mv "$BINARY_PATH" "/usr/local/bin/$BINARY_NAME"
+          sudo chmod +x "/usr/local/bin/$BINARY_NAME"
+          
+          echo "Testing installation:"
+          which "$BINARY_NAME"
+          "$BINARY_NAME" --version
 
       - name: Build Contract
         run: cargo build --target wasm32-unknown-unknown --release

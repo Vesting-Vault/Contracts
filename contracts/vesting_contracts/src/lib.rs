@@ -13,6 +13,8 @@ const VAULT_DATA: Symbol = Symbol::new(&"VAULT_DATA");
 const USER_VAULTS: Symbol = Symbol::new(&"USER_VAULTS");
 const INITIAL_SUPPLY: Symbol = Symbol::new(&"INITIAL_SUPPLY");
 const ADMIN_BALANCE: Symbol = Symbol::new(&"ADMIN_BALANCE");
+const ADMIN_ADDRESS: Symbol = Symbol::new(&"ADMIN_ADDRESS");
+const PROPOSED_ADMIN: Symbol = Symbol::new(&"PROPOSED_ADMIN");
 
 // Vault structure with lazy initialization
 #[contracttype]
@@ -43,12 +45,59 @@ impl VestingContract {
         // Set admin balance (initially all tokens go to admin)
         env.storage().instance().set(&ADMIN_BALANCE, &initial_supply);
         
+        // Set admin address
+        env.storage().instance().set(&ADMIN_ADDRESS, &admin);
+        
         // Initialize vault count
         env.storage().instance().set(&VAULT_COUNT, &0u64);
     }
     
+    // Helper function to check if caller is admin
+    fn require_admin(env: &Env) {
+        let admin: Address = env.storage().instance().get(&ADMIN_ADDRESS)
+            .unwrap_or_else(|| panic!("Admin not set"));
+        let caller = env.current_contract_address();
+        require!(caller == admin, "Caller is not admin");
+    }
+    
+    // Propose a new admin (first step of two-step process)
+    pub fn propose_new_admin(env: Env, new_admin: Address) {
+        Self::require_admin(&env);
+        
+        // Store the proposed admin
+        env.storage().instance().set(&PROPOSED_ADMIN, &new_admin);
+    }
+    
+    // Accept admin ownership (second step of two-step process)
+    pub fn accept_ownership(env: Env) {
+        let proposed_admin: Address = env.storage().instance().get(&PROPOSED_ADMIN)
+            .unwrap_or_else(|| panic!("No proposed admin found"));
+        
+        let caller = env.current_contract_address();
+        require!(caller == proposed_admin, "Caller is not the proposed admin");
+        
+        // Transfer admin rights
+        env.storage().instance().set(&ADMIN_ADDRESS, &proposed_admin);
+        
+        // Clear the proposed admin
+        env.storage().instance().remove(&PROPOSED_ADMIN);
+    }
+    
+    // Get current admin address
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&ADMIN_ADDRESS)
+            .unwrap_or_else(|| panic!("Admin not set"))
+    }
+    
+    // Get proposed admin address (if any)
+    pub fn get_proposed_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&PROPOSED_ADMIN)
+    }
+    
     // Full initialization - writes all metadata immediately
     pub fn create_vault_full(env: Env, owner: Address, amount: i128, start_time: u64, end_time: u64) -> u64 {
+        Self::require_admin(&env);
+        
         // Get next vault ID
         let mut vault_count: u64 = env.storage().instance().get(&VAULT_COUNT).unwrap_or(0);
         vault_count += 1;
@@ -87,6 +136,8 @@ impl VestingContract {
     
     // Lazy initialization - writes minimal data initially
     pub fn create_vault_lazy(env: Env, owner: Address, amount: i128, start_time: u64, end_time: u64) -> u64 {
+        Self::require_admin(&env);
+        
         // Get next vault ID
         let mut vault_count: u64 = env.storage().instance().get(&VAULT_COUNT).unwrap_or(0);
         vault_count += 1;
@@ -178,6 +229,8 @@ impl VestingContract {
     
     // Batch create vaults with lazy initialization
     pub fn batch_create_vaults_lazy(env: Env, batch_data: BatchCreateData) -> Vec<u64> {
+        Self::require_admin(&env);
+        
         let mut vault_ids = Vec::new(&env);
         let initial_count: u64 = env.storage().instance().get(&VAULT_COUNT).unwrap_or(0);
         
@@ -215,6 +268,8 @@ impl VestingContract {
     
     // Batch create vaults with full initialization
     pub fn batch_create_vaults_full(env: Env, batch_data: BatchCreateData) -> Vec<u64> {
+        Self::require_admin(&env);
+        
         let mut vault_ids = Vec::new(&env);
         let initial_count: u64 = env.storage().instance().get(&VAULT_COUNT).unwrap_or(0);
         

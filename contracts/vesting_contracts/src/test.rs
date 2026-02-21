@@ -321,3 +321,146 @@ fn test_revoke_nonexistent_vault() {
     });
     assert!(result.is_err());
 }
+
+
+#[test]
+fn test_transfer_beneficiary_nonexistent_vault() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+    
+    client.initialize(&admin, &1000000i128);
+    
+    let invalid_vault_id = 999u64;
+    
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&beneficiary);
+    });
+    
+    let result = std::panic::catch_unwind(|| {
+        client.transfer_beneficiary(&invalid_vault_id, &new_beneficiary);
+    });
+    assert!(result.is_err());
+}
+
+// -------------------------------------------------------------------------
+// Additional beneficiary-transfer tests added for coverage
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_transfer_beneficiary_unauthorized_user() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    client.initialize(&admin, &1000000i128);
+
+    // create a normal vault as admin
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    let vault_id = client.create_vault_full(&beneficiary, &1000i128, &0u64, &100u64);
+
+    // switch to unauthorized address and attempt transfer
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&unauthorized);
+    });
+    let result = std::panic::catch_unwind(|| {
+        client.transfer_beneficiary(&vault_id, &new_beneficiary);
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_transfer_beneficiary_successful_full() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    client.initialize(&admin, &1000000i128);
+
+    // create and verify vault ownership
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    let vault_id = client.create_vault_full(&beneficiary, &500i128, &50u64, &150u64);
+    assert_eq!(client.get_vault(&vault_id).owner, beneficiary);
+
+    // ensure user vault lists are correct prior to transfer
+    let list_before = client.get_user_vaults(&beneficiary);
+    assert_eq!(list_before.len(), 1);
+    assert_eq!(list_before.get(0), vault_id);
+    assert_eq!(client.get_user_vaults(&new_beneficiary).len(), 0);
+
+    // perform transfer as admin
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    client.transfer_beneficiary(&vault_id, &new_beneficiary);
+
+    // verify vault owner changed
+    let updated_vault = client.get_vault(&vault_id);
+    assert_eq!(updated_vault.owner, new_beneficiary);
+
+    // check user vault lists update accordingly
+    let old_list = client.get_user_vaults(&beneficiary);
+    assert_eq!(old_list.len(), 0);
+    let new_list = client.get_user_vaults(&new_beneficiary);
+    assert_eq!(new_list.len(), 1);
+    assert_eq!(new_list.get(0), vault_id);
+}
+
+#[test]
+fn test_transfer_beneficiary_lazy_behaviour() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    client.initialize(&admin, &1000000i128);
+
+    // create vault lazily
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    let vault_id = client.create_vault_lazy(&beneficiary, &750i128, &10u64, &20u64);
+
+    // before initialization, none of the owners should have the vault listed
+    assert_eq!(client.get_user_vaults(&beneficiary).len(), 0);
+    assert_eq!(client.get_user_vaults(&new_beneficiary).len(), 0);
+
+    // transfer beneficiary while vault is still lazy
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    client.transfer_beneficiary(&vault_id, &new_beneficiary);
+
+    // reading the vault will auto-initialize metadata and update lists
+    let vault_after = client.get_vault(&vault_id);
+    assert_eq!(vault_after.owner, new_beneficiary);
+    assert!(vault_after.is_initialized);
+
+    // verify the index moved to the new beneficiary only
+    assert_eq!(client.get_user_vaults(&beneficiary).len(), 0);
+    let final_list = client.get_user_vaults(&new_beneficiary);
+    assert_eq!(final_list.len(), 1);
+    assert_eq!(final_list.get(0), vault_id);
+}
+
+

@@ -267,6 +267,51 @@ impl VestingContract {
         
         claim_amount
     }
+
+    /// Transfers the beneficiary role of a vault to a new address.
+    /// Only the admin can perform this action (e.g., in case of lost keys).
+    pub fn transfer_beneficiary(env: Env, vault_id: u64, new_address: Address) {
+        Self::require_admin(&env);
+
+        let mut vault: Vault = env.storage().instance()
+            .get(&VAULT_DATA, &vault_id)
+            .unwrap_or_else(|| panic!("Vault not found"));
+
+        let old_owner = vault.owner.clone();
+
+        // Update user vaults index if the vault has been initialized
+        if vault.is_initialized {
+            // Remove vault_id from old owner's list
+            let old_vaults: Vec<u64> = env.storage().instance()
+                .get(&USER_VAULTS, &old_owner)
+                .unwrap_or(Vec::new(&env));
+            
+            let mut updated_old_vaults = Vec::new(&env);
+            for id in old_vaults.iter() {
+                if id != vault_id {
+                    updated_old_vaults.push_back(id);
+                }
+            }
+            env.storage().instance().set(&USER_VAULTS, &old_owner, &updated_old_vaults);
+
+            // Add vault_id to new owner's list
+            let mut new_vaults: Vec<u64> = env.storage().instance()
+                .get(&USER_VAULTS, &new_address)
+                .unwrap_or(Vec::new(&env));
+            new_vaults.push_back(vault_id);
+            env.storage().instance().set(&USER_VAULTS, &new_address, &new_vaults);
+        }
+
+        // Update vault owner
+        vault.owner = new_address.clone();
+        env.storage().instance().set(&VAULT_DATA, &vault_id, &vault);
+
+        // Emit BeneficiaryChanged event
+        env.events().publish(
+            (Symbol::new(&env, "BeneficiaryChanged"), vault_id),
+            (old_owner, new_address)
+        );
+    }
     
     // Batch create vaults with lazy initialization
     pub fn batch_create_vaults_lazy(env: Env, batch_data: BatchCreateData) -> Vec<u64> {

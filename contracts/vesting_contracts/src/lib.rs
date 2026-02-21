@@ -35,6 +35,13 @@ pub struct BatchCreateData {
     pub end_times: Vec<u64>,
 }
 
+#[contracttype]
+pub struct TokensRevoked {
+    pub vault_id: u64,
+    pub amount_returned_to_admin: i128,
+    pub timestamp: u64,
+}
+
 #[contractimpl]
 impl VestingContract {
     // Initialize contract with initial supply
@@ -365,6 +372,41 @@ impl VestingContract {
         }
         
         vault_ids
+    }
+    
+    // Revoke tokens from a vault and return them to admin
+    pub fn revoke_tokens(env: Env, vault_id: u64) -> i128 {
+        Self::require_admin(&env);
+        
+        let mut vault: Vault = env.storage().instance()
+            .get(&VAULT_DATA, &vault_id)
+            .unwrap_or_else(|| {
+                panic!("Vault not found");
+            });
+        
+        // Calculate amount to return (unreleased tokens)
+        let unreleased_amount = vault.total_amount - vault.released_amount;
+        require!(unreleased_amount > 0, "No tokens available to revoke");
+        
+        // Update vault to mark all tokens as released (effectively revoking them)
+        vault.released_amount = vault.total_amount;
+        env.storage().instance().set(&VAULT_DATA, &vault_id, &vault);
+        
+        // Return tokens to admin balance
+        let mut admin_balance: i128 = env.storage().instance().get(&ADMIN_BALANCE).unwrap_or(0);
+        admin_balance += unreleased_amount;
+        env.storage().instance().set(&ADMIN_BALANCE, &admin_balance);
+        
+        // Get current timestamp
+        let timestamp = env.ledger().timestamp();
+        
+        // Emit TokensRevoked event
+        env.events().publish(
+            (Symbol::new(&env, "TokensRevoked"), vault_id),
+            (unreleased_amount, timestamp),
+        );
+        
+        unreleased_amount
     }
     
     // Get contract state for invariant checking

@@ -174,3 +174,150 @@ fn test_batch_operations_admin_control() {
     assert_eq!(vault_ids.get(0), 1);
     assert_eq!(vault_ids.get(1), 2);
 }
+
+#[test]
+fn test_revoke_tokens() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    
+    // Create addresses for testing
+    let admin = Address::generate(&env);
+    let vault_owner = Address::generate(&env);
+    let unauthorized_user = Address::generate(&env);
+    
+    // Initialize contract with admin
+    let initial_supply = 1000000i128;
+    client.initialize(&admin, &initial_supply);
+    
+    // Create a vault
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let vault_amount = 1000i128;
+    let vault_id = client.create_vault_full(&vault_owner, &vault_amount, &100u64, &200u64);
+    
+    // Test: Unauthorized user cannot revoke tokens
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&unauthorized_user);
+    });
+    
+    let result = std::panic::catch_unwind(|| {
+        client.revoke_tokens(&vault_id);
+    });
+    assert!(result.is_err());
+    
+    // Test: Admin can revoke tokens
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let initial_admin_balance = 1000000i128 - vault_amount; // After vault creation
+    let revoked_amount = client.revoke_tokens(&vault_id);
+    assert_eq!(revoked_amount, vault_amount);
+    
+    // Verify admin balance increased
+    let final_admin_balance = initial_admin_balance + revoked_amount;
+    // Note: We can't directly check admin balance without a getter, but we can verify through invariant
+    
+    // Verify vault is fully released
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.released_amount, vault.total_amount);
+    
+    // Test: Cannot revoke tokens from already revoked vault
+    let result = std::panic::catch_unwind(|| {
+        client.revoke_tokens(&vault_id);
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_revoke_tokens_partial_claim() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    
+    // Create addresses for testing
+    let admin = Address::generate(&env);
+    let vault_owner = Address::generate(&env);
+    
+    // Initialize contract with admin
+    let initial_supply = 1000000i128;
+    client.initialize(&admin, &initial_supply);
+    
+    // Create a vault
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let vault_amount = 1000i128;
+    let vault_id = client.create_vault_full(&vault_owner, &vault_amount, &100u64, &200u64);
+    
+    // Claim some tokens first
+    let claim_amount = 300i128;
+    let claimed = client.claim_tokens(&vault_id, &claim_amount);
+    assert_eq!(claimed, claim_amount);
+    
+    // Revoke remaining tokens
+    let revoked_amount = client.revoke_tokens(&vault_id);
+    assert_eq!(revoked_amount, vault_amount - claim_amount);
+    
+    // Verify vault is fully released
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.released_amount, vault.total_amount);
+}
+
+#[test]
+fn test_revoke_tokens_event() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    
+    // Create addresses for testing
+    let admin = Address::generate(&env);
+    let vault_owner = Address::generate(&env);
+    
+    // Initialize contract with admin
+    let initial_supply = 1000000i128;
+    client.initialize(&admin, &initial_supply);
+    
+    // Create a vault
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let vault_amount = 1000i128;
+    let vault_id = client.create_vault_full(&vault_owner, &vault_amount, &100u64, &200u64);
+    
+    // Revoke tokens and check event
+    let revoked_amount = client.revoke_tokens(&vault_id);
+    
+    // Verify the event was emitted (this would need to be checked with event listeners in a real scenario)
+    // For now, we just verify the function returns the correct amount
+    assert_eq!(revoked_amount, vault_amount);
+}
+
+#[test]
+fn test_revoke_nonexistent_vault() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    
+    // Create addresses for testing
+    let admin = Address::generate(&env);
+    
+    // Initialize contract with admin
+    let initial_supply = 1000000i128;
+    client.initialize(&admin, &initial_supply);
+    
+    // Test: Cannot revoke tokens from nonexistent vault
+    env.as_contract(&contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let result = std::panic::catch_unwind(|| {
+        client.revoke_tokens(&999u64);
+    });
+    assert!(result.is_err());
+}

@@ -22,6 +22,3 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
-[[bench]]
-name = "lazy_vs_full"
-harness = false

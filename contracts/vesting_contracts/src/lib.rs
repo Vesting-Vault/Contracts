@@ -42,6 +42,15 @@ pub struct TokensRevoked {
     pub timestamp: u64,
 }
 
+#[contracttype]
+pub struct VaultCreated {
+    pub vault_id: u64,
+    pub beneficiary: Address,
+    pub total_amount: i128,
+    pub cliff_duration: u64,
+    pub start_time: u64,
+}
+
 #[contractimpl]
 impl VestingContract {
     // Initialize contract with initial supply
@@ -137,7 +146,19 @@ impl VestingContract {
         
         // Update vault count
         env.storage().instance().set(&VAULT_COUNT, &vault_count);
-        
+
+        // Emit VaultCreated event with strictly typed fields
+        let now = env.ledger().timestamp();
+        let cliff_duration = if start_time > now { start_time - now } else { 0 };
+        let vault_created = VaultCreated {
+            vault_id: vault_count,
+            beneficiary: owner.clone(),
+            total_amount: amount,
+            cliff_duration,
+            start_time,
+        };
+        env.events().publish((Symbol::new(&env, "VaultCreated"), vault_count), vault_created);
+
         vault_count
     }
     
@@ -173,6 +194,19 @@ impl VestingContract {
         
         // Don't update user vaults list yet (lazy)
         
+
+        // Emit VaultCreated event with strictly typed fields
+        let now = env.ledger().timestamp();
+        let cliff_duration = if start_time > now { start_time - now } else { 0 };
+        let vault_created = VaultCreated {
+            vault_id: vault_count,
+            beneficiary: owner.clone(),
+            total_amount: amount,
+            cliff_duration,
+            start_time,
+        };
+        env.events().publish((Symbol::new(&env, "VaultCreated"), vault_count), vault_created);
+
         vault_count
     }
     
@@ -264,6 +298,18 @@ impl VestingContract {
             // Store vault data (minimal writes)
             env.storage().instance().set(&VAULT_DATA, &vault_id, &vault);
             vault_ids.push_back(vault_id);
+            // Emit VaultCreated event for each created vault
+            let now = env.ledger().timestamp();
+            let start_time = batch_data.start_times.get(i).unwrap();
+            let cliff_duration = if start_time > now { start_time - now } else { 0 };
+            let vault_created = VaultCreated {
+                vault_id,
+                beneficiary: vault.owner.clone(),
+                total_amount: vault.total_amount,
+                cliff_duration,
+                start_time,
+            };
+            env.events().publish((Symbol::new(&env, "VaultCreated"), vault_id), vault_created);
         }
         
         // Update vault count once (cheaper than individual updates)
@@ -311,6 +357,18 @@ impl VestingContract {
             env.storage().instance().set(&USER_VAULTS, &vault.owner, &user_vaults);
             
             vault_ids.push_back(vault_id);
+            // Emit VaultCreated event for each created vault
+            let now = env.ledger().timestamp();
+            let start_time = batch_data.start_times.get(i).unwrap();
+            let cliff_duration = if start_time > now { start_time - now } else { 0 };
+            let vault_created = VaultCreated {
+                vault_id,
+                beneficiary: vault.owner.clone(),
+                total_amount: vault.total_amount,
+                cliff_duration,
+                start_time,
+            };
+            env.events().publish((Symbol::new(&env, "VaultCreated"), vault_id), vault_created);
         }
         
         // Update vault count once

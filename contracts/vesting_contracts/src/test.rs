@@ -491,6 +491,64 @@ fn test_revoke_partial_with_claims() {
     assert_eq!(final_vault.total_amount, vault_amount);
 }
 
+#[test]
+fn test_usdc_integration_mock_token() {
+    use soroban_sdk::{token, Address, Env, Vec};
+    use soroban_sdk::token::{TokenClient};
+
+    let env = Env::default();
+    
+    // Deploy a mock token contract that simulates USDC (18 decimals)
+    let token_contract_id = env.register_stellar_asset_contract(None);
+    let token_client = TokenClient::new(&env, &token_contract_id);
+    
+    // Initialize the token with 18 decimals (USDC style)
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    token_client.initialize(admin.clone(), &7, &String::from_str(&env, "USDC"), &String::from_str(&env, "USDC")); // 7 decimals for test
+    
+    // Mint some tokens to the user (1,000,000 USDC * 10^7 = 100,000,000,000,000)
+    let usdc_amount = 1_000_000_i128; // 1M USDC
+    let scaled_amount = usdc_amount * 10_i128.pow(7); // Scale to include 7 decimals
+    token_client.mint(&user, &scaled_amount);
+    
+    // Verify the user has the tokens
+    assert_eq!(token_client.balance(&user), scaled_amount);
+    
+    // Now deploy the vesting contract
+    let vesting_contract_id = env.register(VestingContract, ());
+    let vesting_client = VestingContractClient::new(&env, &vesting_contract_id);
+    
+    // Initialize the vesting contract with a large enough supply to cover our vault
+    let initial_supply = scaled_amount * 2; // 2x to be safe
+    vesting_client.initialize(&admin, &initial_supply);
+    
+    // Create a vault with 1,000,000 USDC worth of tokens (using the scaled amount)
+    env.as_contract(&vesting_contract_id, || {
+        env.current_contract_address().set(&admin);
+    });
+    
+    let vault_id = vesting_client.create_vault_full(&user, &scaled_amount, &100u64, &200u64);
+    
+    // Verify the vault was created correctly
+    let vault = vesting_client.get_vault(&vault_id);
+    assert_eq!(vault.total_amount, scaled_amount);
+    assert_eq!(vault.owner, user);
+    
+    // Test that claims work correctly with the scaled amounts
+    // First, advance the ledger time to make some tokens claimable
+    env.ledger().set_timestamp(150); // Halfway through the vesting period
+    
+    // Check claimable balance
+    let claimable = scaled_amount / 2; // Should be roughly half since we're halfway through
+    let claimed = vesting_client.claim_tokens(&vault_id, &claimable);
+    assert_eq!(claimed, claimable);
+    
+    // Verify vault state after claim
+    let updated_vault = vesting_client.get_vault(&vault_id);
+    assert_eq!(updated_vault.released_amount, claimable);
+}
+
 // -------------------------------------------------------------------------
 // Additional beneficiary-transfer tests added for coverage
 // -------------------------------------------------------------------------

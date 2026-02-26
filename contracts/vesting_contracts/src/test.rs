@@ -2279,6 +2279,226 @@ fn test_global_pause_functionality() {
         let original_start_time = vault.start_time;
         let original_cliff_duration = vault.cliff_duration;
 
+    // -------------------------------------------------------------------------
+    // Periodic Vesting Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_monthly_vesting_step_function() {
+        let (env, contract_id, client, admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        
+        // Create a 12-month vault with monthly step duration (30 days = 2,592,000 seconds)
+        let monthly_seconds = 30 * 24 * 60 * 60; // 2,592,000 seconds
+        let total_amount = 12000i128; // 1000 tokens per month
+        let start_time = 10000u64;
+        let end_time = start_time + (12 * monthly_seconds); // 12 months
+        
+        env.as_contract(&contract_id, || {
+            env.current_contract_address().set(&admin);
+        });
+        
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &total_amount,
+            &start_time,
+            &end_time,
+            &0i128, // no keeper fee
+            &false, // revocable
+            &true,  // transferable
+            &monthly_seconds, // monthly step duration
+        );
+
+        // Test 1: Before start time - should have 0 vested
+        env.ledger().set_timestamp(start_time - 1000);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 0i128, "Should have 0 vested before start time");
+
+        // Test 2: Exactly at start time - should have 0 vested
+        env.ledger().set_timestamp(start_time);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 0i128, "Should have 0 vested at start time");
+
+        // Test 3: Half way through first month - should still have 0 vested (rounding down)
+        env.ledger().set_timestamp(start_time + (monthly_seconds / 2));
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 0i128, "Should have 0 vested half way through first month");
+
+        // Test 4: Exactly 1 month completed - should have 1000 vested
+        env.ledger().set_timestamp(start_time + monthly_seconds);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 1000i128, "Should have 1000 vested after 1 month");
+
+        // Test 5: 1 month + 1 day - should still have 1000 vested (rounding down)
+        env.ledger().set_timestamp(start_time + monthly_seconds + (24 * 60 * 60));
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 1000i128, "Should have 1000 vested after 1 month + 1 day");
+
+        // Test 6: Exactly 6 months completed - should have 6000 vested
+        env.ledger().set_timestamp(start_time + (6 * monthly_seconds));
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 6000i128, "Should have 6000 vested after 6 months");
+
+        // Test 7: Exactly 12 months completed - should have all 12000 vested
+        env.ledger().set_timestamp(end_time);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 12000i128, "Should have all 12000 vested at end time");
+
+        // Test 8: After end time - should still have all 12000 vested
+        env.ledger().set_timestamp(end_time + monthly_seconds);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 12000i128, "Should have all 12000 vested after end time");
+    }
+
+    #[test]
+    fn test_quarterly_vesting() {
+        let (env, contract_id, client, admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        
+        // Create a 1-year vault with quarterly step duration (3 months = 90 days)
+        let quarterly_seconds = 90 * 24 * 60 * 60; // 7,776,000 seconds
+        let total_amount = 4000i128; // 1000 tokens per quarter
+        let start_time = 10000u64;
+        let end_time = start_time + (4 * quarterly_seconds); // 4 quarters
+        
+        env.as_contract(&contract_id, || {
+            env.current_contract_address().set(&admin);
+        });
+        
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &total_amount,
+            &start_time,
+            &end_time,
+            &0i128,
+            &false,
+            &true,
+            &quarterly_seconds,
+        );
+
+        // Test: Should vest in quarterly steps
+        env.ledger().set_timestamp(start_time + quarterly_seconds);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 1000i128, "Should have 1000 vested after 1 quarter");
+
+        env.ledger().set_timestamp(start_time + (2 * quarterly_seconds));
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 2000i128, "Should have 2000 vested after 2 quarters");
+
+        env.ledger().set_timestamp(start_time + (3 * quarterly_seconds));
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 3000i128, "Should have 3000 vested after 3 quarters");
+
+        env.ledger().set_timestamp(end_time);
+        let claimable = client.get_claimable_amount(&vault_id);
+        assert_eq!(claimable, 4000i128, "Should have all 4000 vested at end");
+    }
+
+    #[test]
+    fn test_linear_vs_periodic_vesting() {
+        let (env, contract_id, client, admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        
+        let total_amount = 12000i128;
+        let start_time = 10000u64;
+        let duration = 12 * 30 * 24 * 60 * 60; // 12 months in seconds
+        let end_time = start_time + duration;
+        let monthly_seconds = 30 * 24 * 60 * 60;
+        
+        env.as_contract(&contract_id, || {
+            env.current_contract_address().set(&admin);
+        });
+        
+        // Create linear vesting vault
+        let linear_vault_id = client.create_vault_full(
+            &beneficiary,
+            &total_amount,
+            &start_time,
+            &end_time,
+            &0i128,
+            &false,
+            &true,
+            &0u64, // step_duration = 0 for linear
+        );
+
+        // Create periodic vesting vault
+        let periodic_vault_id = client.create_vault_full(
+            &beneficiary,
+            &total_amount,
+            &start_time,
+            &end_time,
+            &0i128,
+            &false,
+            &true,
+            &monthly_seconds, // monthly steps
+        );
+
+        // Test at 6 months: linear should have 6000, periodic should have 6000
+        env.ledger().set_timestamp(start_time + (6 * monthly_seconds));
+        
+        let linear_claimable = client.get_claimable_amount(&linear_vault_id);
+        let periodic_claimable = client.get_claimable_amount(&periodic_vault_id);
+        
+        assert_eq!(linear_claimable, 6000i128, "Linear should have 6000 at 6 months");
+        assert_eq!(periodic_claimable, 6000i128, "Periodic should have 6000 at 6 months");
+
+        // Test at 6.5 months: linear should have ~6500, periodic should still have 6000
+        env.ledger().set_timestamp(start_time + (6 * monthly_seconds) + (monthly_seconds / 2));
+        
+        let linear_claimable = client.get_claimable_amount(&linear_vault_id);
+        let periodic_claimable = client.get_claimable_amount(&periodic_vault_id);
+        
+        assert!(linear_claimable > 6000i128 && linear_claimable < 7000i128, 
+                "Linear should be between 6000-7000 at 6.5 months");
+        assert_eq!(periodic_claimable, 6000i128, 
+                  "Periodic should still have 6000 at 6.5 months (rounding down)");
+    }
+
+    #[test]
+    fn test_periodic_vesting_edge_cases() {
+        let (env, contract_id, client, admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        
+        env.as_contract(&contract_id, || {
+            env.current_contract_address().set(&admin);
+        });
+        
+        // Test 1: Zero duration vault
+        let vault_id1 = client.create_vault_full(
+            &beneficiary,
+            &1000i128,
+            &10000u64,
+            &10000u64, // same start and end time
+            &0i128,
+            &false,
+            &true,
+            &2592000u64, // monthly
+        );
+        
+        let claimable = client.get_claimable_amount(&vault_id1);
+        assert_eq!(claimable, 1000i128, "Zero duration vault should vest all immediately");
+
+        // Test 2: Step duration longer than total duration
+        let vault_id2 = client.create_vault_full(
+            &beneficiary,
+            &1000i128,
+            &10000u64,
+            &20000u64, // 10,000 seconds duration
+            &0i128,
+            &false,
+            &true,
+            &86400u64, // 1 day step (longer than duration)
+        );
+        
+        env.ledger().set_timestamp(15000u64); // in the middle
+        let claimable = client.get_claimable_amount(&vault_id2);
+        assert_eq!(claimable, 0i128, "Should have 0 vested when step > duration");
+
+        env.ledger().set_timestamp(20000u64); // at end
+        let claimable = client.get_claimable_amount(&vault_id2);
+        assert_eq!(claimable, 1000i128, "Should have all vested at end time");
+    }
+
         // Attempt to update vault via admin functions (should not affect start_time/cliff_duration)
         client.mark_irrevocable(&vault_id);
         client.transfer_beneficiary(&vault_id, &Address::generate(&env));

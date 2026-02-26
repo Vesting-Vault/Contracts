@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, token, vec, Address, Env, IntoVal, Map, Symbol, Vec, String};
+use soroban_sdk::{contract, contractimpl, contracttype, token, vec, Address, Env, IntoVal, Map, Symbol, Val, Vec, String};
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, vec, Address, Env, IntoVal, Map, Symbol, Vec,
     String,
@@ -806,6 +806,167 @@ impl VestingContract {
         env.storage().instance().set(&DataKey::VaultData(vault_id), &updated_vault);
 
         token_client.transfer(&env.current_contract_address(), &updated_vault.owner, &transfer_amount);
+
+        transfer_amount
+    }
+
+    /// Claim vested tokens and atomically invoke a target contract within the
+    /// same transaction.  Typical use-case: the beneficiary claims tokens and
+    /// has them swapped to USDC on a DEX in a single call.
+    ///
+    /// # Authorization
+    /// - `vault.owner.require_auth()` — only the beneficiary may trigger this.
+    /// - The vesting contract authorizes the outbound token transfer to
+    ///   `target_contract` via its own contract address.
+    /// - Soroban cross-contract authorization is verified automatically by the
+    ///   runtime when `env.invoke_contract` is executed.
+    ///
+    /// # Token flow
+    /// 1. Tokens are released from the vault (same accounting as `claim_tokens`).
+    /// 2. Tokens are transferred to `target_contract` (not to the beneficiary).
+    /// 3. `target_contract.<function>(args)` is invoked.
+    ///
+    /// The caller is responsible for constructing `args` so the target contract
+    /// sends the result (e.g. swapped tokens) to the desired destination.
+    pub fn claim_and_call(
+        env: Env,
+        vault_id: u64,
+        claim_amount: i128,
+        target_contract: Address,
+        function: Symbol,
+        args: Vec<Val>,
+    ) -> i128 {
+        Self::require_not_deprecated(&env);
+
+        if Self::is_paused(env.clone()) {
+            panic!("Contract is paused - all operations are disabled");
+        }
+
+        let mut vault: Vault = env
+            .storage()
+            .instance()
+            .get(&DataKey::VaultData(vault_id))
+            .unwrap_or_else(|| panic!("Vault not found"));
+
+        if vault.is_frozen {
+            panic!("Vault is frozen - claims are disabled");
+        }
+        if !vault.is_initialized {
+            panic!("Vault not initialized");
+        }
+        if claim_amount <= 0 {
+            panic!("Claim amount must be positive");
+        }
+
+        // Only the vault owner can trigger claim_and_call
+        vault.owner.require_auth();
+
+        // --- vesting / milestone unlock calculation (mirrors claim_tokens) ---
+        let unlocked_amount = if env
+            .storage()
+            .instance()
+            .has(&DataKey::VaultMilestones(vault_id))
+        {
+            let milestones = Self::require_milestones_configured(&env, vault_id);
+            let unlocked_pct = Self::unlocked_percentage(&milestones);
+            Self::unlocked_amount(vault.total_amount, unlocked_pct)
+        } else {
+            Self::calculate_time_vested_amount(&env, &vault)
+        };
+
+        // Auto-unstake if liquid balance is insufficient
+        let liquid_balance = vault.total_amount - vault.released_amount - vault.staked_amount;
+        if claim_amount > liquid_balance {
+            let deficit = claim_amount - liquid_balance;
+
+            let staking_contract: Address = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "StakingContract"))
+                .expect("Staking contract not set");
+
+            let unstake_args =
+                vec![&env, vault_id.into_val(&env), deficit.into_val(&env)];
+            env.invoke_contract::<()>(
+                &staking_contract,
+                &Symbol::new(&env, "unstake"),
+                unstake_args,
+            );
+
+            vault.staked_amount -= deficit;
+
+            let mut total_staked: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalStaked)
+                .unwrap_or(0);
+            total_staked -= deficit;
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalStaked, &total_staked);
+        }
+
+        let available_to_claim = unlocked_amount - vault.released_amount;
+        if available_to_claim <= 0 {
+            panic!("No tokens available to claim");
+        }
+        if claim_amount > available_to_claim {
+            panic!("Insufficient unlocked tokens to claim");
+        }
+
+        // --- yield distribution (mirrors claim_tokens) -----------------------
+        let token_client = Self::get_token_client(&env);
+        let current_balance = token_client.balance(&env.current_contract_address());
+        let admin_balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminBalance)
+            .unwrap_or(0);
+
+        let total_shares: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalShares)
+            .unwrap_or(0);
+        let total_staked: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalStaked)
+            .unwrap_or(0);
+        let liquid_shares = total_shares - total_staked;
+
+        let vault_portion = (current_balance - admin_balance).max(0);
+        let transfer_amount = if liquid_shares > 0 {
+            (claim_amount * vault_portion) / liquid_shares
+        } else {
+            claim_amount
+        };
+
+        // --- update vault accounting ----------------------------------------
+        vault.released_amount += claim_amount;
+        let updated_total_shares = total_shares - claim_amount;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &updated_total_shares);
+        env.storage()
+            .instance()
+            .set(&DataKey::VaultData(vault_id), &vault);
+
+        // --- transfer tokens to target_contract (not the beneficiary) -------
+        token_client.transfer(
+            &env.current_contract_address(),
+            &target_contract,
+            &transfer_amount,
+        );
+
+        // --- cross-contract callback ----------------------------------------
+        let _ = env.invoke_contract::<Val>(&target_contract, &function, args);
+
+        // --- event -----------------------------------------------------------
+        env.events().publish(
+            (Symbol::new(&env, "ClaimAndCall"), vault_id),
+            (vault.owner, target_contract, function, transfer_amount),
+        );
 
         transfer_amount
     }

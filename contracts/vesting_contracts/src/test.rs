@@ -9,6 +9,7 @@ mod tests {
     use soroban_sdk::{
         contract, contractimpl,
         testutils::{Address as _, Ledger},
+        token, vec, Address, Env, IntoVal, Symbol,
         token, vec, Address, Env, Symbol, String,
     };
 
@@ -2313,6 +2314,314 @@ fn test_global_pause_functionality() {
         env.ledger().set_timestamp(start_time - 1000);
         let claimable = client.get_claimable_amount(&vault_id);
         assert_eq!(claimable, 0i128, "Should have 0 vested before start time");
+
+    // =========================================================================
+    // claim_and_call tests (beneficiary claim hooks)
+    // =========================================================================
+
+    /// Mock receiver contract that simulates a DEX or downstream handler.
+    /// Tokens are transferred to this contract *before* the callback fires,
+    /// so it can inspect its own balance and act accordingly.
+    #[contract]
+    pub struct MockReceiverContract;
+
+    #[contractimpl]
+    impl MockReceiverContract {
+        /// Simulates a swap callback invoked by `claim_and_call`.
+        pub fn swap(env: Env, beneficiary: Address, min_amount_out: i128) {
+            env.events().publish(
+                Symbol::new(&env, "SwapExecuted"),
+                (beneficiary, min_amount_out),
+            );
+        }
+    }
+
+    #[test]
+    fn test_claim_and_call_transfers_to_target_and_invokes() {
+        let (env, contract_id, client, _admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &10_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        // Register mock receiver (simulates a DEX)
+        let receiver_id = env.register(MockReceiverContract, ());
+
+        // Advance time past end so all tokens vest
+        env.ledger().with_mut(|l| l.timestamp = now + 1_001);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        let transferred = client.claim_and_call(
+            &vault_id,
+            &10_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+
+        // Tokens went to the receiver, not the beneficiary
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&beneficiary), 0);
+        assert!(token_client.balance(&receiver_id) >= transferred);
+
+        // Vault accounting updated
+        let vault = client.get_vault(&vault_id);
+        assert_eq!(vault.released_amount, 10_000i128);
+    }
+
+    #[test]
+    fn test_claim_and_call_partial_claim() {
+        let (env, _cid, client, _admin, _token) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &10_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        env.ledger().with_mut(|l| l.timestamp = now + 500);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        let transferred = client.claim_and_call(
+            &vault_id,
+            &5_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+        assert_eq!(transferred, 5_000i128);
+
+        let vault = client.get_vault(&vault_id);
+        assert_eq!(vault.released_amount, 5_000i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "Vault is frozen")]
+    fn test_claim_and_call_frozen_vault_panics() {
+        let (env, _cid, client, _admin, _token) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &1_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+        client.freeze_vault(&vault_id);
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        env.ledger().with_mut(|l| l.timestamp = now + 1_001);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        client.claim_and_call(
+            &vault_id,
+            &1_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Vault not initialized")]
+    fn test_claim_and_call_uninitialized_vault_panics() {
+        let (env, _cid, client, _admin, _token) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_lazy(
+            &beneficiary,
+            &1_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        env.ledger().with_mut(|l| l.timestamp = now + 1_001);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        client.claim_and_call(
+            &vault_id,
+            &1_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Claim amount must be positive")]
+    fn test_claim_and_call_zero_amount_panics() {
+        let (env, _cid, client, _admin, _token) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &1_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        env.ledger().with_mut(|l| l.timestamp = now + 1_001);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        client.claim_and_call(
+            &vault_id,
+            &0i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+    }
+
+    #[test]
+    fn test_claim_and_call_with_yield_distribution() {
+        let (env, contract_id, client, _admin, token_addr) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &10_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        // Simulate yield accrual by minting extra tokens to the contract
+        let stellar = token::StellarAssetClient::new(&env, &token_addr);
+        stellar.mint(&contract_id, &2_000i128);
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        env.ledger().with_mut(|l| l.timestamp = now + 1_001);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        let transferred = client.claim_and_call(
+            &vault_id,
+            &10_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+
+        // Should include yield: 10k principal + 2k yield = 12k
+        assert_eq!(transferred, 12_000i128);
+
+        // Tokens landed on the receiver, not the beneficiary
+        let token_client = token::Client::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&receiver_id), 12_000i128);
+        assert_eq!(token_client.balance(&beneficiary), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Insufficient unlocked tokens to claim")]
+    fn test_claim_and_call_exceeding_vested_panics() {
+        let (env, _cid, client, _admin, _token) = setup();
+        let beneficiary = Address::generate(&env);
+        let now = env.ledger().timestamp();
+
+        let vault_id = client.create_vault_full(
+            &beneficiary,
+            &10_000i128,
+            &now,
+            &(now + 1_000),
+            &0i128,
+            &true,
+            &false,
+            &0u64,
+        );
+
+        let receiver_id = env.register(MockReceiverContract, ());
+        // Only half the time has passed — 5k vested
+        env.ledger().with_mut(|l| l.timestamp = now + 500);
+
+        let function = Symbol::new(&env, "swap");
+        let args = vec![
+            &env,
+            beneficiary.clone().into_val(&env),
+            0i128.into_val(&env),
+        ];
+
+        // Try to claim 8k but only 5k available
+        client.claim_and_call(
+            &vault_id,
+            &8_000i128,
+            &receiver_id,
+            &function,
+            &args,
+        );
+    }
 
         // Test 2: Exactly at start time - should have 0 vested
         env.ledger().set_timestamp(start_time);

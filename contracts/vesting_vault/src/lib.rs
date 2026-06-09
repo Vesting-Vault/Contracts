@@ -2384,16 +2384,16 @@ impl VestingVault {
             None
         }
     }
+}
 
-    /// Struct for schedule data extracted from vault storage
-    #[derive(Clone, Debug)]
-    struct ScheduleData {
-        beneficiary: Address,
-        asset_address: Address,
-        total_amount: i128,
-        claimed_amount: i128,
-        start_time: u64,
-        end_time: u64,
-        cliff_duration: u64,
-    }
+/// Struct for schedule data extracted from vault storage
+#[derive(Clone, Debug)]
+struct ScheduleData {
+    beneficiary: Address,
+    asset_address: Address,
+    total_amount: i128,
+    claimed_amount: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_duration: u64,
 }

@@ -7,6 +7,10 @@ members = [
     "contracts/vesting_vault",
     "contracts/deposit_to_yield_adapter",
     "contracts/insurance_treasury",
+    "contracts/flash_loan_defense",
+    "contracts/yield_circuit_breaker",
+    "contracts/collateral_buffer",
+    "contracts/collateralized_borrowing_adapter",
 ]
 resolver = "2"
 
